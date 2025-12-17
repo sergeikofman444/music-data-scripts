@@ -1,0 +1,20 @@
+# python env
+/venv
+
+# env variables
+.env
+
+#data files - will add these once they are all ready
+/input_files
+/output_files
+2020-2024_charts.csv
+2025_charts.csv
+
+#pychache
+/__pychache__
+
+#cache
+.cache
+
+#DS Store
+.DS_Store
