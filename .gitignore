@@ -9,6 +9,9 @@
 /output_files
 2020-2024_charts.csv
 2025_charts.csv
+2015-2019_charts.csv
+2011-2014_charts.csv
+tracks_features.csv
 
 #pychache
 /__pychache__

@@ -1,7 +1,7 @@
 import pandas as pd
 import os
 
-INPUT_FILE = '2020-2024_charts.csv'
+INPUT_FILE = '2010-2014_charts.csv'
 OUTPUT_DIR = 'input_files'
 OUTPUT_FILENAME_PREFIX = 'hot100_'
 

@@ -8,10 +8,15 @@ def initialize_spotify_client():
     CLIENT_ID = os.environ.get('SPOTIPY_CLIENT_ID')
     CLIENT_SECRET = os.environ.get('SPOTIPY_CLIENT_SECRET')
     try:
-        sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
-            client_id=CLIENT_ID,
-            client_secret=CLIENT_SECRET
-        ))
+        sp = spotipy.Spotify(
+            auth_manager=SpotifyClientCredentials(
+                client_id=CLIENT_ID,
+                client_secret=CLIENT_SECRET
+            ), 
+            requests_timeout=10, 
+            retries=5,
+            status_retries=3, 
+            backoff_factor=0.3)
         print("Spotify API client initialized successfully.")
         return sp
     except Exception as e:

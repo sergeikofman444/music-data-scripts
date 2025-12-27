@@ -2,163 +2,130 @@ import pandas as pd
 import time
 import os
 from datetime import datetime
-
 from isrc_lookup import get_track_data_from_spotify
 from spotify_client import initialize_spotify_client
 
-INPUT_FILE = 'historic_data.csv'
-OUTPUT_FILE = 'historic_data_with_isrc.csv'
-RATE_LIMIT_DELAY = 0.05 
-
+# --- Configuration ---
 INPUT_DIR = 'input_files'
 OUTPUT_DIR = 'output_files'
+RATE_LIMIT_DELAY = 0.25
 
-all_tracks_data = []
-all_chart_entries_data = []
-all_artists_data = []
-all_artist_tracks_data = []
+def load_existing_ids(filename, id_column):
+    """Reads a CSV and returns a set of unique IDs to prevent duplicates."""
+    file_path = os.path.join(OUTPUT_DIR, filename)
+    if os.path.exists(file_path):
+        try:
+            existing_df = pd.read_csv(file_path)
+            return set(existing_df[id_column].dropna().astype(str).unique())
+        except Exception as e:
+            print(f"Note: Could not load existing data from {filename}: {e}")
+    return set()
 
-# Sets for efficient primary key tracking
-tracks_seen = set()
-chart_entries_seen = set()
-artists_seen = set()
-artist_tracks_seen = set()
+def load_existing_composite_keys(filename, col1, col2):
+    """Special loader for mapping tables (like artist_tracks) using tuples."""
+    file_path = os.path.join(OUTPUT_DIR, filename)
+    seen = set()
+    if os.path.exists(file_path):
+        df = pd.read_csv(file_path)
+        for _, row in df.iterrows():
+            seen.add((str(row[col1]), str(row[col2])))
+    return seen
 
-# --- Spotify API Setup ---
-
-def prepare_files_list(input_dir, output_dir):
-    chart_files_list = [
-        f for f in os.listdir(input_dir) 
-        if f.endswith('.csv') and not f.startswith('Unnamed')
-    ]
-    
-    if not chart_files_list:
-        print(f"Error: No CSV files found in {input_dir}. Exiting.")
+def save_data(data_list, filename):
+    """Appends a list of dictionaries to a CSV file."""
+    if not data_list:
         return
-
-    unique_chart_dates = {
-        datetime.strptime(f.split('_')[-1].replace('.csv', ''), '%Y-%m-%d').date() 
-        for f in chart_files_list
-    }
+        
+    df = pd.DataFrame(data_list)
+    file_path = os.path.join(OUTPUT_DIR, filename)
+    file_exists = os.path.isfile(file_path)
     
-    chart_instance_df = pd.DataFrame([
-        {'id': instance.isoformat(), 'date': instance.isoformat()} 
-        for instance in unique_chart_dates
-    ]).reset_index(drop=True)
+    # Append mode 'a' prevents overwriting previous batches
+    df.to_csv(file_path, mode='a', index=False, header=not file_exists)
+    print(f"Saved {len(data_list)} new rows to {filename}")
 
-    os.makedirs(output_dir, exist_ok=True)
-
-    return {
-        'chart_files_list': chart_files_list,
-        'chart_instance_df': chart_instance_df
-    }
-
-def process_file(chart_df, chart_instance_id, sp_client, all_tracks_data, tracks_seen, all_chart_entries_data, chart_entries_seen, all_artists_data, artists_seen, all_artist_tracks_data, artist_tracks_seen):
-    for index, row in chart_df.iterrows():
-            
-        track_name = row['track']
-        artist_name = row['artist']
-        position = row['position']
-        
-        track_data = get_track_data_from_spotify(track_name, artist_name, sp_client)
-
-        if track_data is not None:
-            isrc = track_data['isrc']
-
-            if isrc != 'NOT_FOUND':
-                if isrc not in tracks_seen:
-                    all_tracks_data.append({
-                        'id': isrc,
-                        'spotify_track_id': track_data['spotify_track_id'],
-                        'name': track_name,
-                        # Other track metadata (album, genre) will be filled later via Spotify API
-                    })
-                    tracks_seen.add(isrc)
-
-                artists_list = track_data['artists']
-                
-                for artist in artists_list:
-
-                    artist_name = artist['name']
-                    artist_id = artist['id']
-                    
-                    if artist_id not in artists_seen:
-                        all_artists_data.append({
-                            'id': artist_id, 
-                            'name': artist_name,
-                            # ... other fields filled later
-                        })
-                        artists_seen.add(artist_id)
-                    
-                    artist_track_key = (artist_id, isrc)
-                    if artist_track_key not in artist_tracks_seen:
-                        all_artist_tracks_data.append({
-                            'artist_id': artist_id,
-                            'track_isrc': isrc
-                        })
-                        artist_tracks_seen.add(artist_track_key)
-            
-            entry_key = (chart_instance_id, isrc)
-            if entry_key not in chart_entries_seen:
-                all_chart_entries_data.append({
-                    'chart_instance_id': chart_instance_id,
-                    'track_isrc': isrc,
-                    'position': position
-                })
-                chart_entries_seen.add(entry_key)
-            
-            
-
-        time.sleep(RATE_LIMIT_DELAY)
-
-def prepare_chart_files(chart_files_list, input_dir):
-
-    # initialize spotify api client
+def process_charts():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     sp = initialize_spotify_client()
+    
+    # 1. Initialize "Seen" sets from existing CSVs
+    print("Initializing memory from existing files...")
+    tracks_seen = load_existing_ids('tracks.csv', 'id')
+    artists_seen = load_existing_ids('artists.csv', 'id')
+    charts_seen = load_existing_ids('chart_instance.csv', 'id')
+    at_seen = load_existing_composite_keys('artist_tracks.csv', 'artist_id', 'track_isrc')
+    ce_seen = load_existing_composite_keys('chart_entries.csv', 'chart_instance_id', 'track_isrc')
 
-    # --- Loop through all input files ---
-    for filename in chart_files_list:
-        if not filename.endswith('.csv'):
-            continue
-            
-        file_path = os.path.join(input_dir, filename)
-        
-        # Determine the chart date from the filename (e.g., hot100_YYYY-MM-DD.csv)
+    chart_files = sorted([f for f in os.listdir(INPUT_DIR) if f.endswith('.csv')])
+
+    for filename in chart_files:
         try:
             date_str = filename.split('_')[-1].replace('.csv', '')
-            chart_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-            chart_instance_id = chart_date.isoformat() 
-        except Exception:
-            print(f"Skipping {filename}: Could not parse date from filename. Filename must end in YYYY-MM-DD.csv")
+            chart_id = datetime.strptime(date_str, '%Y-%m-%d').date().isoformat()
+        except:
             continue
+
+        # Skip if this chart date was already processed in a previous year/batch
+        if chart_id in charts_seen:
+            print(f"Skipping {chart_id} - already processed.")
+            continue
+
+        print(f"\n--- Processing: {chart_id} ---")
+        chart_df = pd.read_csv(os.path.join(INPUT_DIR, filename))
+        
+        # Batch containers for this specific file
+        b_tracks, b_artists, b_ce, b_at = [], [], [], []
+
+        for _, row in chart_df.iterrows():
+            track_name, artist_name = row['track'], row['artist']
+            pos = row.get('position', _ + 1)
             
-        print(f"\n--- Processing Chart: {chart_instance_id} ---")
+            # Spotify lookup
+            track_data = get_track_data_from_spotify(track_name, artist_name, sp)
+            if not track_data or track_data['isrc'] == 'NOT_FOUND':
+                continue
 
-        # 2. Load and Clean Chart Data
-        chart_df = pd.read_csv(file_path)
-        chart_df = chart_df.drop(columns=[col for col in chart_df.columns if col.startswith('Unnamed:')])
+            isrc = track_data['isrc']
 
-        if 'position' not in chart_df.columns:
-            chart_df['position'] = chart_df.index + 1
+            # Deduplicate Tracks
+            if isrc not in tracks_seen:
+                b_tracks.append({
+                    'id': isrc,
+                    'spotify_track_id': track_data['spotify_track_id'],
+                    'name': track_name
+                })
+                tracks_seen.add(isrc)
 
+            # Deduplicate Artists & Mappings
+            for artist in track_data['artists']:
+                a_id = artist['id']
+                if a_id not in artists_seen:
+                    b_artists.append({'id': a_id, 'name': artist['name']})
+                    artists_seen.add(a_id)
+                
+                if (a_id, isrc) not in at_seen:
+                    b_at.append({'artist_id': a_id, 'track_isrc': isrc})
+                    at_seen.add((a_id, isrc))
 
-        process_file(chart_df, chart_instance_id, sp, all_tracks_data, tracks_seen, all_chart_entries_data, chart_entries_seen, all_artists_data, artists_seen, all_artist_tracks_data, artist_tracks_seen)
+            # Deduplicate Entries
+            if (chart_id, isrc) not in ce_seen:
+                b_ce.append({
+                    'chart_instance_id': chart_id,
+                    'track_isrc': isrc,
+                    'position': pos
+                })
+                ce_seen.add((chart_id, isrc))
 
-files = prepare_files_list(INPUT_DIR, OUTPUT_DIR)
+            time.sleep(RATE_LIMIT_DELAY)
 
-chart_files_list = files['chart_files_list']
-chart_instance_df = files['chart_instance_df']
+        # 2. Immediate Save (Atomic batches)
+        save_data([{'id': chart_id, 'date': chart_id}], 'chart_instance.csv')
+        save_data(b_tracks, 'tracks.csv')
+        save_data(b_artists, 'artists.csv')
+        save_data(b_ce, 'chart_entries.csv')
+        save_data(b_at, 'artist_tracks.csv')
+        
+        charts_seen.add(chart_id)
 
-prepare_chart_files(chart_files_list, INPUT_DIR)
-
-tracks_df = pd.DataFrame(all_tracks_data).reset_index(drop=True)
-artists_df = pd.DataFrame(all_artists_data).reset_index(drop=True)
-chart_entries_df = pd.DataFrame(all_chart_entries_data).reset_index(drop=True)
-artist_tracks_df = pd.DataFrame(all_artist_tracks_data).reset_index(drop=True)
-
-
-chart_instance_df.to_csv(os.path.join(OUTPUT_DIR, 'chart_instance.csv'), index=False)
-tracks_df.to_csv(os.path.join(OUTPUT_DIR, 'tracks.csv'), index=False)
-artists_df.to_csv(os.path.join(OUTPUT_DIR, 'artists.csv'), index=False)
-chart_entries_df.to_csv(os.path.join(OUTPUT_DIR, 'chart_entries.csv'), index=False)
-artist_tracks_df.to_csv(os.path.join(OUTPUT_DIR, 'artist_tracks.csv'), index=False)
+if __name__ == "__main__":
+    process_charts()
