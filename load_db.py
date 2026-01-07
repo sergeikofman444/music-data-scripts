@@ -33,34 +33,39 @@ def load_data_from_csv(table_name):
     return pd.read_csv(csv_path)
 
 def bulk_insert(conn, df, table_name, columns, conflict_key=None):
-    """
-    Handles bulk insertion using execute_batch with optional conflict handling.
-    """
     if df.empty:
         print(f"Skipping {table_name}: DataFrame is empty.")
         return
 
-    df = df.fillna('') 
+    df_to_insert = df[columns].astype(object)
+    df_to_insert = df_to_insert.where(pd.notnull(df_to_insert), None)
     
-    data_to_insert = df[columns].values.tolist()
+    data_to_insert = df_to_insert.values.tolist()
 
     placeholders = ', '.join(['%s'] * len(columns))
-    sql_insert = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
+    cols_str = ', '.join(columns)
+    sql_insert = f"INSERT INTO {table_name} ({cols_str}) VALUES ({placeholders})"
     
     if conflict_key:
         if isinstance(conflict_key, (list, tuple)):
             key_str = f"({', '.join(conflict_key)})"
+            update_cols = [c for c in columns if c not in conflict_key]
         else:
             key_str = f"({conflict_key})"
+            update_cols = [c for c in columns if c != conflict_key]
             
-        sql_insert += f" ON CONFLICT {key_str} DO NOTHING"
+        # FIX: Only use DO UPDATE if there are non-key columns to change
+        if update_cols:
+            update_stmt = ', '.join([f"{c} = EXCLUDED.{c}" for c in update_cols])
+            sql_insert += f" ON CONFLICT {key_str} DO UPDATE SET {update_stmt}"
+        else:
+            # Fallback for tables with only one column (the primary key)
+            sql_insert += f" ON CONFLICT {key_str} DO NOTHING"
     
     cursor = conn.cursor()
-    
-    print(f"  -> Loading {len(data_to_insert)} rows into '{table_name}'...")
+    print(f"  -> Loading/Syncing {len(data_to_insert)} rows into '{table_name}'...")
     
     execute_batch(cursor, sql_insert, data_to_insert)
-    
     conn.commit()
     print(f"  ✅ Data loaded for '{table_name}'.")
 
@@ -75,14 +80,38 @@ def load_chart_instance(conn):
         )
 
 def load_artists(conn):
-    df = load_data_from_csv('artists')
-    if df is not None:
-        bulk_insert(
-            conn, df, 
-            table_name='artists', 
-            columns=['id', 'name'],
-            conflict_key='id'
-        )
+    df = load_data_from_csv('artists') 
+    if df is None: return
+
+    # 1. Rename 'type' to 'artist_type' if it exists
+    if 'type' in df.columns:
+        df = df.rename(columns={'type': 'artist_type'})
+
+    # 2. Define the columns the DB expects
+    expected_cols = [
+        'id', 'name', 'followers', 
+        'musicbrainz_id', 'artist_type', 
+        'country_of_origin', 'year_of_origin'
+    ]
+    
+    # 3. Handle missing columns (like if musicbrainz_id isn't there yet)
+    for col in expected_cols:
+        if col not in df.columns:
+            df[col] = None
+
+    # 4. Clean the Year
+    df['year_of_origin'] = pd.to_numeric(
+        df['year_of_origin'].astype(str).str[:4], 
+        errors='coerce'
+    ).astype('Int64')
+    
+    # 5. Load into DB
+    bulk_insert(
+        conn, df, 
+        table_name='artists', 
+        columns=expected_cols,
+        conflict_key='id'
+    )
 
 def load_tracks(conn):
     df = load_data_from_csv('tracks')

@@ -6,7 +6,6 @@
 
 #data files - will add these once they are all ready
 /input_files
-/output_files
 2020-2024_charts.csv
 2025_charts.csv
 2015-2019_charts.csv
@@ -21,3 +20,6 @@ tracks_features.csv
 
 #DS Store
 .DS_Store
+
+#docker db re-alignment
+match_tracks_with_docker.py
